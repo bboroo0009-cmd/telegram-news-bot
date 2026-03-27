@@ -5,6 +5,8 @@ import json
 import time
 import hashlib
 import asyncio
+import base64
+import gzip
 from dotenv import load_dotenv
 from telethon import TelegramClient, events
 from openai import OpenAI
@@ -14,17 +16,43 @@ sys.stderr.reconfigure(encoding="utf-8")
 
 load_dotenv()
 
-API_ID = int(os.getenv("API_ID"))
-API_HASH = os.getenv("API_HASH")
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-TARGET_CHANNEL = os.getenv("TARGET_CHANNEL")
+def restore_session_from_env(env_name: str, output_file: str) -> None:
+    data = os.getenv(env_name)
+    if not data:
+        return
+
+    data = data.strip()
+    raw = gzip.decompress(base64.b64decode(data))
+
+    with open(output_file, "wb") as f:
+        f.write(raw)
+
+
+def require_env(name: str) -> str:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        raise ValueError(f"{name} хоосон байна. Railway Variables эсвэл .env файлаа шалга.")
+    return value.strip()
+
+
+API_ID = int(require_env("API_ID"))
+API_HASH = require_env("API_HASH")
+BOT_TOKEN = require_env("BOT_TOKEN")
+OPENAI_API_KEY = require_env("OPENAI_API_KEY")
+TARGET_CHANNEL = require_env("TARGET_CHANNEL")
+
 SOURCE_CHANNELS = [
     x.strip().lstrip("@")
     for x in os.getenv("SOURCE_CHANNELS", "").split(",")
     if x.strip()
 ]
+
+if not SOURCE_CHANNELS:
+    raise ValueError("SOURCE_CHANNELS хоосон байна. Railway Variables эсвэл .env файлаа шалга.")
+
+restore_session_from_env("USER_SESSION_B64", "user_session.session")
+restore_session_from_env("BOT_SESSION_B64", "bot_session.session")
 
 oa = OpenAI(api_key=OPENAI_API_KEY)
 
@@ -431,11 +459,16 @@ async def handler(event):
 
 
 async def main():
-    if not SOURCE_CHANNELS:
-        raise ValueError("SOURCE_CHANNELS хоосон байна. .env файлаа шалга.")
+    await user_client.connect()
+    await bot_client.connect()
 
-    await user_client.start()
-    await bot_client.start(bot_token=BOT_TOKEN)
+    if not await user_client.is_user_authorized():
+        raise RuntimeError(
+            "user_session.session ажиллахгүй байна. USER_SESSION_B64 variable эсвэл session restore кодоо шалга."
+        )
+
+    if not await bot_client.is_user_authorized():
+        await bot_client.start(bot_token=BOT_TOKEN)
 
     print("Bot started...")
     print("Listening:", SOURCE_CHANNELS)
