@@ -5,6 +5,7 @@ import json
 import time
 import hashlib
 import asyncio
+from difflib import SequenceMatcher
 from dotenv import load_dotenv
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
@@ -31,7 +32,7 @@ TARGET_CHANNEL = require_env("TARGET_CHANNEL")
 USER_STRING_SESSION = require_env("USER_STRING_SESSION")
 
 SOURCE_CHANNELS = [
-    x.strip().lstrip("@")
+    x.strip().lstrip("@").lower()
     for x in os.getenv("SOURCE_CHANNELS", "").split(",")
     if x.strip()
 ]
@@ -45,54 +46,46 @@ user_client = TelegramClient(StringSession(USER_STRING_SESSION), API_ID, API_HAS
 bot_client = TelegramClient("bot_session", API_ID, API_HASH)
 
 SEEN_FILE = "seen_news.json"
-SEEN_TTL_SECONDS = 60 * 60 * 8  # 8 цаг
+SMART_DUP_FILE = "smart_seen_news.json"
 
-MAJOR_SOURCES = {
-    "wublockchainenglish": "Wu Blockchain",
-    "financialjuice": "FinancialJuice",
-    "marketsalpha": "MarketsAlpha",
-    "reuters": "Reuters",
-    "bloomberg": "Bloomberg",
-    "coindesk": "CoinDesk",
-    "cointelegraph": "Cointelegraph",
-    "fxhedgers": "FXHedgers",
-    "axios": "Axios",
-}
+SEEN_TTL_SECONDS = 60 * 60 * 8
+SMART_DUP_TTL_SECONDS = 60 * 60 * 6
 
 CATEGORY_LABELS = {
     "geopolitics": "🌍 Геополитик",
     "financial_markets": "📈 Санхүүгийн зах зээл",
     "crypto": "🪙 Крипто",
     "commodities": "🛢 Газрын тос, алт",
-    "economy": "📊 Эдийн засгийн чухал мэдээ",
+    "economy": "📊 Эдийн засаг",
 }
 
 
-def load_seen():
-    if not os.path.exists(SEEN_FILE):
+def load_json_file(path: str):
+    if not os.path.exists(path):
         return {}
     try:
-        with open(SEEN_FILE, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return {}
 
 
-def save_seen(data):
-    with open(SEEN_FILE, "w", encoding="utf-8") as f:
+def save_json_file(path: str, data):
+    with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-seen_cache = load_seen()
+seen_cache = load_json_file(SEEN_FILE)
+smart_dup_cache = load_json_file(SMART_DUP_FILE)
 
 
-def cleanup_seen():
+def cleanup_cache(cache: dict, ttl: int, path: str):
     now = int(time.time())
-    expired = [k for k, v in seen_cache.items() if now - v > SEEN_TTL_SECONDS]
+    expired = [k for k, v in cache.items() if now - v.get("ts", 0) > ttl]
     for k in expired:
-        seen_cache.pop(k, None)
+        cache.pop(k, None)
     if expired:
-        save_seen(seen_cache)
+        save_json_file(path, cache)
 
 
 def clean_text(text: str) -> str:
@@ -109,7 +102,6 @@ def clean_text(text: str) -> str:
     text = re.sub(r"https?://\S+", "", text)
     text = re.sub(r"[ \t]{2,}", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
-
     return text.strip()
 
 
@@ -117,18 +109,16 @@ def is_junk(text: str) -> bool:
     if not text:
         return True
 
-    stripped = text.strip()
-    lowered = stripped.lower()
+    stripped = text.strip().lower()
 
     urgent_terms = [
         "iran", "israel", "russia", "ukraine", "china", "taiwan",
         "military", "missile", "airstrike", "troops", "bombing",
         "ground forces", "final blow", "breaking", "urgent",
-        "axios", "pentagon", "white house", "tehran", "retaliation",
         "attack", "strike"
     ]
 
-    if any(term in lowered for term in urgent_terms):
+    if any(term in stripped for term in urgent_terms):
         return False
 
     if len(stripped) < 30:
@@ -149,49 +139,29 @@ def is_junk(text: str) -> bool:
 
 def keyword_match(text: str) -> bool:
     t = text.lower()
-
     keywords = [
         "war", "military", "missile", "iran", "israel", "russia", "ukraine",
         "china", "taiwan", "nato", "sanction", "conflict", "troops",
         "airstrike", "middle east", "tehran", "moscow", "beijing",
         "ground forces", "bombing campaign", "military options",
-        "final blow", "strike package", "retaliation", "attack plan",
-        "defense ministry", "white house", "pentagon", "axios",
-        "ceasefire", "drone strike", "naval", "army", "defense",
+        "final blow", "retaliation", "attack", "white house", "pentagon",
 
         "stocks", "stock market", "s&p 500", "sp500", "nasdaq", "dow",
-        "bond", "treasury", "yield", "yields", "equities", "futures",
-        "wall street", "fed", "federal reserve", "rate cut", "rate hike",
-        "shares", "index", "investors",
+        "bond", "treasury", "yield", "equities", "futures",
+        "fed", "federal reserve", "rate cut", "rate hike",
 
         "bitcoin", "btc", "ethereum", "eth", "crypto", "cryptocurrency",
         "solana", "binance", "blockchain", "token", "stablecoin", "altcoin",
-        "etf inflow", "on-chain", "wallet", "exchange",
+        "etf inflow", "wallet", "exchange",
 
         "oil", "crude", "brent", "wti", "gold", "silver", "commodity",
-        "commodities", "natural gas", "opec", "barrel", "bullion",
+        "natural gas", "opec", "barrel", "bullion",
 
         "inflation", "cpi", "ppi", "gdp", "recession", "economy", "economic",
         "unemployment", "payrolls", "jobs report", "nonfarm payrolls",
-        "central bank", "interest rate", "consumer spending", "retail sales", "macro",
+        "central bank", "interest rate", "consumer spending", "retail sales",
     ]
-
     return any(k in t for k in keywords)
-
-
-def is_urgent_geopolitics(text: str) -> bool:
-    t = text.lower()
-
-    urgent_patterns = [
-        "iran", "israel", "russia", "ukraine",
-        "military options", "ground forces", "bombing campaign",
-        "final blow", "missile", "airstrike", "troops",
-        "attack", "retaliation", "white house", "pentagon",
-        "tehran", "middle east", "axios", "drone strike"
-    ]
-
-    hits = sum(1 for p in urgent_patterns if p in t)
-    return hits >= 2
 
 
 def normalize_for_hash(text: str) -> str:
@@ -207,49 +177,80 @@ def get_text_hash(text: str) -> str:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
-def is_duplicate(text: str) -> bool:
-    cleanup_seen()
+def is_exact_duplicate(text: str) -> bool:
+    cleanup_cache(seen_cache, SEEN_TTL_SECONDS, SEEN_FILE)
     h = get_text_hash(text)
     now = int(time.time())
 
     if h in seen_cache:
         return True
 
-    seen_cache[h] = now
-    save_seen(seen_cache)
+    seen_cache[h] = {"ts": now}
+    save_json_file(SEEN_FILE, seen_cache)
     return False
 
 
-def detect_source(event, text: str) -> str | None:
-    channel_name = ""
-
-    try:
-        if getattr(event, "chat", None):
-            if getattr(event.chat, "username", None):
-                channel_name = event.chat.username.lower()
-            elif getattr(event.chat, "title", None):
-                channel_name = event.chat.title.lower()
-    except Exception:
-        pass
-
-    combined = f"{channel_name} {text.lower()}"
-
-    for key, label in MAJOR_SOURCES.items():
-        if key in combined:
-            return label
-
-    return None
+def text_similarity(a: str, b: str) -> float:
+    return SequenceMatcher(None, a, b).ratio()
 
 
-def get_priority_score(text: str, source_label: str | None = None) -> int:
+def get_semantic_key(text: str) -> str:
+    t = normalize_for_hash(text)
+
+    important = [
+        "iran", "israel", "russia", "ukraine", "china", "taiwan",
+        "fed", "fomc", "powell", "cpi", "ppi", "gdp",
+        "bitcoin", "btc", "ethereum", "eth", "solana",
+        "oil", "crude", "brent", "wti", "gold", "silver",
+        "stocks", "nasdaq", "sp500", "s&p 500", "dow",
+        "treasury", "yield", "opec", "etf", "sec",
+        "missile", "airstrike", "troops", "attack", "ceasefire"
+    ]
+
+    hits = [w for w in important if w in t]
+    words = re.findall(r"\b[a-z0-9$%.-]{3,}\b", t)
+    short = " ".join((hits + words[:12])[:18])
+    return short.strip()
+
+
+def is_smart_duplicate(text: str) -> bool:
+    cleanup_cache(smart_dup_cache, SMART_DUP_TTL_SECONDS, SMART_DUP_FILE)
+
+    now = int(time.time())
+    current_norm = normalize_for_hash(text)
+    current_key = get_semantic_key(text)
+
+    for _, item in smart_dup_cache.items():
+        old_norm = item.get("norm", "")
+        old_key = item.get("key", "")
+
+        sim = text_similarity(current_norm[:600], old_norm[:600])
+
+        same_key = (
+            current_key
+            and old_key
+            and (
+                current_key in old_key
+                or old_key in current_key
+                or text_similarity(current_key, old_key) > 0.82
+            )
+        )
+
+        if sim > 0.88 or (same_key and sim > 0.72):
+            return True
+
+    smart_dup_cache[get_text_hash(text)] = {
+        "ts": now,
+        "norm": current_norm[:1200],
+        "key": current_key[:300],
+    }
+    save_json_file(SMART_DUP_FILE, smart_dup_cache)
+    return False
+
+
+def get_priority_score(text: str) -> int:
     t = text.lower()
     score = 0.0
-
-    if source_label:
-        if source_label in ["FinancialJuice", "MarketsAlpha", "Bloomberg", "Reuters", "FXHedgers", "Axios"]:
-            score += 3
-        elif source_label in ["Wu Blockchain", "CoinDesk", "Cointelegraph"]:
-            score += 2
 
     strong_terms = [
         "breaking", "urgent",
@@ -262,7 +263,7 @@ def get_priority_score(text: str, source_label: str | None = None) -> int:
         "opec", "oil", "crude", "gold",
         "bitcoin etf", "ethereum etf", "sec",
         "ground forces", "bombing campaign", "military options",
-        "final blow", "retaliation", "pentagon", "white house", "axios"
+        "final blow", "retaliation", "pentagon", "white house"
     ]
 
     medium_terms = [
@@ -271,12 +272,7 @@ def get_priority_score(text: str, source_label: str | None = None) -> int:
         "crypto", "bitcoin", "ethereum", "binance", "solana",
         "commodities", "natural gas",
         "economy", "central bank", "consumer spending", "retail sales",
-        "etf inflow", "etf inflows", "attack", "strike"
-    ]
-
-    weak_terms = [
-        "market", "markets", "investors", "shares",
-        "exchange", "token", "blockchain"
+        "etf inflow", "attack", "strike"
     ]
 
     for term in strong_terms:
@@ -287,59 +283,65 @@ def get_priority_score(text: str, source_label: str | None = None) -> int:
         if term in t:
             score += 1
 
-    for term in weak_terms:
-        if term in t:
-            score += 0.5
-
     if "%" in t:
         score += 1
-
     if "$" in t:
         score += 1
-
     if re.search(r"\b\d+bp\b", t):
         score += 1
-
-    if re.search(r"\b\d+\.\d+%\b", t) or re.search(r"\b\d+%\b", t):
+    if re.search(r"\b\d+(\.\d+)?%\b", t):
         score += 1
 
     return int(score)
 
 
-def get_priority_label(score: int) -> str:
-    if score >= 8:
+def get_priority_label(score: int, text: str) -> str:
+    t = text.lower()
+    ultra_terms = [
+        "breaking", "urgent", "missile", "airstrike", "ground forces",
+        "bombing campaign", "fed", "fomc", "cpi", "ppi", "nonfarm payrolls"
+    ]
+
+    ultra_hit = any(term in t for term in ultra_terms)
+
+    if score >= 8 or ultra_hit:
         return "🚨 BREAKING"
-    if score >= 6:
+    if score >= 5:
         return "⚡ HIGH PRIORITY"
-    if score >= 4:
-        return "📌 IMPORTANT"
-    return ""
+    return "📰 UPDATE"
 
 
-def ai_process_news(text: str):
+def ai_process_news(text: str, priority_label: str):
     cleaned = clean_text(text)
 
     prompt = f"""
-Classify this news into one of:
-geopolitics, financial_markets, crypto, commodities, economy.
-If not relevant, return IGNORE.
+You are formatting a premium Mongolian Telegram market news post.
 
-If relevant, return exactly:
+Return exactly in this structure:
 
-CATEGORY: <label>
-TITLE: <short Mongolian headline>
-BODY: <2-3 short Mongolian sentences>
+CATEGORY: <geopolitics|financial_markets|crypto|commodities|economy>
+TITLE: <very short strong Mongolian headline>
+SUMMARY: <2 short Mongolian sentences explaining the news clearly>
+IMPACT: <1-2 short Mongolian sentences about market impact, trader angle, what may react>
+WHY: <1 short Mongolian sentence on why this matters now>
 
 Rules:
 - Natural Mongolian
-- Short and clear
+- No source mention
 - No links
 - No promo
-- Keep important names/tickers
-- No extra text
+- No hashtags
+- No markdown
+- Keep tickers / instruments if relevant
+- Market impact must mention likely reaction in assets like BTC, gold, oil, dollar, stocks when relevant
+- Keep it concise and sharp
+- If irrelevant, return IGNORE only
 
 News:
 {cleaned}
+
+Priority:
+{priority_label}
 """.strip()
 
     response = oa.responses.create(
@@ -354,22 +356,44 @@ News:
 
     category_match = re.search(r"CATEGORY:\s*(.+)", output)
     title_match = re.search(r"TITLE:\s*(.+)", output)
-    body_match = re.search(r"BODY:\s*(.+)", output, re.DOTALL)
+    summary_match = re.search(r"SUMMARY:\s*(.+)", output)
+    impact_match = re.search(r"IMPACT:\s*(.+)", output)
+    why_match = re.search(r"WHY:\s*(.+)", output)
 
-    if not category_match or not title_match or not body_match:
+    if not all([category_match, title_match, summary_match, impact_match, why_match]):
         return None
 
     category = category_match.group(1).strip().lower()
     title = title_match.group(1).strip()
-    body = body_match.group(1).strip()
+    summary = summary_match.group(1).strip()
+    impact = impact_match.group(1).strip()
+    why = why_match.group(1).strip()
 
     if category not in CATEGORY_LABELS:
         return None
 
-    if len(title) < 4 or len(body) < 20:
+    if len(title) < 4 or len(summary) < 15 or len(impact) < 10:
         return None
 
-    return category, title, body
+    return category, title, summary, impact, why
+
+
+def format_post(priority_label: str, category: str, title: str, summary: str, impact: str, why: str) -> str:
+    parts = [
+        f"{priority_label} | {CATEGORY_LABELS[category]}",
+        "",
+        title,
+        "",
+        "🧠 Товч утга:",
+        summary,
+        "",
+        "📈 Зах зээлд нөлөө:",
+        impact,
+        "",
+        "✅ Яагаад чухал вэ:",
+        why,
+    ]
+    return "\n".join(parts).strip()
 
 
 @user_client.on(events.NewMessage(chats=SOURCE_CHANNELS))
@@ -389,42 +413,40 @@ async def handler(event):
             print("Skipped junk/too short")
             return
 
-        if not keyword_match(cleaned) and not is_urgent_geopolitics(cleaned):
+        if not keyword_match(cleaned):
             print("Skipped by keyword filter")
             return
 
-        if is_duplicate(cleaned):
-            print("Skipped duplicate")
+        if is_exact_duplicate(cleaned):
+            print("Skipped exact duplicate")
             return
 
-        source_label = detect_source(event, cleaned)
+        if is_smart_duplicate(cleaned):
+            print("Skipped smart duplicate")
+            return
 
-        priority_score = get_priority_score(cleaned, source_label)
-        priority_label = get_priority_label(priority_score)
-
-        if priority_score < 3:
+        priority_score = get_priority_score(cleaned)
+        if priority_score < 2:
             print(f"Skipped low priority | score={priority_score}")
             return
 
-        result = ai_process_news(cleaned)
+        priority_label = get_priority_label(priority_score, cleaned)
 
+        result = ai_process_news(cleaned, priority_label)
         if not result:
             print("Skipped by AI")
             return
 
-        category, title, body = result
+        category, title, summary, impact, why = result
 
-        parts = []
-
-        if priority_label:
-            parts.append(priority_label)
-
-        parts.append(CATEGORY_LABELS[category])
-        parts.append(title)
-        parts.append("")
-        parts.append(body)
-
-        final_post = "\n".join(parts).strip()
+        final_post = format_post(
+            priority_label=priority_label,
+            category=category,
+            title=title,
+            summary=summary,
+            impact=impact,
+            why=why,
+        )
 
         await bot_client.send_message(
             TARGET_CHANNEL,
