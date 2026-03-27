@@ -5,28 +5,15 @@ import json
 import time
 import hashlib
 import asyncio
-import base64
-import gzip
 from dotenv import load_dotenv
 from telethon import TelegramClient, events
+from telethon.sessions import StringSession
 from openai import OpenAI
 
 sys.stdout.reconfigure(encoding="utf-8")
 sys.stderr.reconfigure(encoding="utf-8")
 
 load_dotenv()
-
-
-def restore_session_from_env(env_name: str, output_file: str) -> None:
-    data = os.getenv(env_name)
-    if not data:
-        return
-
-    data = data.strip()
-    raw = gzip.decompress(base64.b64decode(data))
-
-    with open(output_file, "wb") as f:
-        f.write(raw)
 
 
 def require_env(name: str) -> str:
@@ -41,6 +28,7 @@ API_HASH = require_env("API_HASH")
 BOT_TOKEN = require_env("BOT_TOKEN")
 OPENAI_API_KEY = require_env("OPENAI_API_KEY")
 TARGET_CHANNEL = require_env("TARGET_CHANNEL")
+USER_STRING_SESSION = require_env("USER_STRING_SESSION")
 
 SOURCE_CHANNELS = [
     x.strip().lstrip("@")
@@ -51,12 +39,9 @@ SOURCE_CHANNELS = [
 if not SOURCE_CHANNELS:
     raise ValueError("SOURCE_CHANNELS хоосон байна. Railway Variables эсвэл .env файлаа шалга.")
 
-restore_session_from_env("USER_SESSION_B64", "user_session.session")
-restore_session_from_env("BOT_SESSION_B64", "bot_session.session")
-
 oa = OpenAI(api_key=OPENAI_API_KEY)
 
-user_client = TelegramClient("user_session", API_ID, API_HASH)
+user_client = TelegramClient(StringSession(USER_STRING_SESSION), API_ID, API_HASH)
 bot_client = TelegramClient("bot_session", API_ID, API_HASH)
 
 SEEN_FILE = "seen_news.json"
@@ -166,7 +151,6 @@ def keyword_match(text: str) -> bool:
     t = text.lower()
 
     keywords = [
-        # geopolitics / urgent alerts
         "war", "military", "missile", "iran", "israel", "russia", "ukraine",
         "china", "taiwan", "nato", "sanction", "conflict", "troops",
         "airstrike", "middle east", "tehran", "moscow", "beijing",
@@ -175,22 +159,18 @@ def keyword_match(text: str) -> bool:
         "defense ministry", "white house", "pentagon", "axios",
         "ceasefire", "drone strike", "naval", "army", "defense",
 
-        # financial markets
         "stocks", "stock market", "s&p 500", "sp500", "nasdaq", "dow",
         "bond", "treasury", "yield", "yields", "equities", "futures",
         "wall street", "fed", "federal reserve", "rate cut", "rate hike",
         "shares", "index", "investors",
 
-        # crypto
         "bitcoin", "btc", "ethereum", "eth", "crypto", "cryptocurrency",
         "solana", "binance", "blockchain", "token", "stablecoin", "altcoin",
         "etf inflow", "on-chain", "wallet", "exchange",
 
-        # commodities
         "oil", "crude", "brent", "wti", "gold", "silver", "commodity",
         "commodities", "natural gas", "opec", "barrel", "bullion",
 
-        # economy
         "inflation", "cpi", "ppi", "gdp", "recession", "economy", "economic",
         "unemployment", "payrolls", "jobs report", "nonfarm payrolls",
         "central bank", "interest rate", "consumer spending", "retail sales", "macro",
@@ -460,15 +440,12 @@ async def handler(event):
 
 async def main():
     await user_client.connect()
-    await bot_client.connect()
+    await bot_client.start(bot_token=BOT_TOKEN)
 
     if not await user_client.is_user_authorized():
         raise RuntimeError(
-            "user_session.session ажиллахгүй байна. USER_SESSION_B64 variable эсвэл session restore кодоо шалга."
+            "USER_STRING_SESSION ажиллахгүй байна. StringSession-ээ дахин үүсгээд Railway Variables дээр шинэчил."
         )
-
-    if not await bot_client.is_user_authorized():
-        await bot_client.start(bot_token=BOT_TOKEN)
 
     print("Bot started...")
     print("Listening:", SOURCE_CHANNELS)
