@@ -1,0 +1,5 @@
+*.session
+*.txt
+*.b64
+user_session*
+bot_session*
